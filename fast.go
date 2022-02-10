@@ -1,17 +1,49 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ddo/go-fast"
 	"github.com/ddo/go-spin"
+	"github.com/miekg/dns"
 )
 
+// resolveIPv4 resolves an address to IPv4 address.
+func resolve(addr string, dnstype uint16) (string, error) {
+	url := strings.Split(addr, ":")
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(url[0]), dnstype)
+	m.RecursionDesired = true
+
+	config, _ := dns.ClientConfigFromFile("/etc/resolv.conf")
+	c := new(dns.Client)
+	r, _, err := c.Exchange(m, net.JoinHostPort(config.Servers[0], config.Port))
+	if err != nil {
+		return "", err
+	}
+	for _, ans := range r.Answer {
+		switch a := ans.(type) {
+		case *dns.A:
+			url[0] = a.A.String()
+		case *dns.AAAA:
+			url[0] = a.AAAA.String()
+		}
+	}
+
+	return strings.Join(url, ":"), nil
+}
+
 func main() {
-	var kb, mb, gb, silent bool
+	var kb, mb, gb, silent, ipv4 bool
+	flag.BoolVar(&ipv4, "4", false, "ipv4 only")
 	flag.BoolVar(&kb, "k", false, "Format output in Kbps")
 	flag.BoolVar(&mb, "m", false, "Format output in Mbps")
 	flag.BoolVar(&gb, "g", false, "Format output in Gbps")
@@ -36,9 +68,30 @@ func main() {
 			}
 		}()
 	}
-	// output
 
 	fastCom := fast.New()
+	if ipv4 {
+		dnstype := dns.TypeA
+
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
+		transport := &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			ForceAttemptHTTP2: false,
+			DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+				addr, err := resolve(addr, dnstype)
+				if err != nil {
+					return nil, err
+				}
+
+				return dialer.DialContext(ctx, network, addr)
+			},
+		}
+		fastCom = fast.NewWithTransport(transport)
+	}
 
 	// init
 	err := fastCom.Init()
@@ -90,7 +143,7 @@ func main() {
 	}
 
 	// finish reading KbpsChan so that the result always gets printed
-	<- done
+	<-done
 
 	return
 }
